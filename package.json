@@ -1,0 +1,17 @@
+{
+  "name": "maalwala-server",
+  "version": "1.0.0",
+  "description": "Backend API for Maalwala — loads, trucks, groups, profile, and WhatsApp Cloud API broadcast.",
+  "type": "commonjs",
+  "main": "server.js",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  }
+}
