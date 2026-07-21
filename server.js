@@ -290,7 +290,43 @@ app.delete('/api/records/:id', handle(async (req, res) => {
   res.status(204).end();
 }));
 
-app.listen(PORT, () => {
+// ---------------------------------------------------------------
+// Auto-seed — if this server has no loads/trucks yet (fresh deploy,
+// or data reset by Render's free-tier restarts), populate a few
+// realistic sample listings so the site never looks empty. Runs
+// every startup but only inserts anything when both are empty.
+// ---------------------------------------------------------------
+async function seedIfEmpty() {
+  try {
+    const [loads, trucks] = await Promise.all([store.loads.all(), store.trucks.all()]);
+    if (loads.length > 0 || trucks.length > 0) return;
+
+    const sampleLoads = [
+      { from: 'Ahmedabad', to: 'Indore', material: 'Cotton Bales', weight: 14, truckType: 'Open Body', rate: 38000, date: '2026-07-18', poster: 'Patel Roadlines', phone: '9825000001', verified: true },
+      { from: 'Surat', to: 'Pune', material: 'Textile Rolls', weight: 9, truckType: 'Container', rate: 29500, date: '2026-07-17', poster: 'Shree Ganesh Transport', phone: '9825000002', verified: false },
+      { from: 'Rajkot', to: 'Delhi', material: 'Ceramic Tiles', weight: 18, truckType: 'Trailer', rate: 64000, date: '2026-07-19', poster: 'Om Logistics', phone: '9825000003', verified: true },
+      { from: 'Vadodara', to: 'Nagpur', material: 'Chemicals (Drums)', weight: 12, truckType: 'Tanker', rate: 41000, date: '2026-07-20', poster: 'Narmada Carriers', phone: '9825000004', verified: false },
+    ];
+    const sampleTrucks = [
+      { from: 'Ahmedabad', to: 'Anywhere Mumbai side', truckType: 'Open Body', capacity: 16, date: '2026-07-17', poster: 'Desai Fleet Owners', phone: '9825000011', driverName: '', driverPhone: '', verified: true },
+      { from: 'Indore', to: 'Ahmedabad / Rajkot', truckType: 'Container', capacity: 10, date: '2026-07-18', poster: 'Malwa Transport Co.', phone: '9825000012', driverName: '', driverPhone: '', verified: false },
+      { from: 'Jaipur', to: 'Anywhere North', truckType: 'Trailer', capacity: 20, date: '2026-07-19', poster: 'Rajputana Roadways', phone: '9825000013', driverName: '', driverPhone: '', verified: true },
+    ];
+
+    for (const l of sampleLoads) {
+      await store.loads.insert({ id: store.id(), ...l, ts: Date.now() });
+    }
+    for (const t of sampleTrucks) {
+      await store.trucks.insert({ id: store.id(), ...t, ts: Date.now() });
+    }
+    console.log('Seeded sample loads and trucks (server had none).');
+  } catch (e) {
+    console.error('Seeding failed (non-fatal):', e.message);
+  }
+}
+
+app.listen(PORT, async () => {
   console.log(`Maalwala API listening on http://localhost:${PORT}`);
   console.log(`WhatsApp Cloud API configured: ${whatsapp.isConfigured()}`);
+  await seedIfEmpty();
 });
