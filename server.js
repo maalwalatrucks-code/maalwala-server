@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const store = require('./store');
 const whatsapp = require('./whatsapp');
+const auth = require('./auth');
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
@@ -21,6 +22,58 @@ function handle(fn) {
     }
   };
 }
+
+// ---------------------------------------------------------------
+// Auth — real accounts with hashed passwords and session tokens.
+// Note: this authenticates users, but most of the app's business
+// data (loads, trucks, profile, records) is still shared/single-
+// tenant rather than scoped per account — see project notes.
+// ---------------------------------------------------------------
+app.post('/api/auth/signup', handle(async (req, res) => {
+  const { businessName, email, password } = req.body || {};
+  if (!businessName || !email || !password) {
+    return res.status(400).json({ error: 'businessName, email and password are required' });
+  }
+  if (String(password).length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  const existing = await store.users.findByEmail(email);
+  if (existing) return res.status(409).json({ error: 'An account with that email already exists — try signing in instead.' });
+
+  const { salt, hash } = auth.hashPassword(password);
+  const user = { id: store.id(), businessName, email: String(email).toLowerCase(), salt, hash, ts: Date.now() };
+  await store.users.insert(user);
+  const token = auth.generateToken();
+  await store.sessions.insert({ token, userId: user.id, ts: Date.now() });
+  res.status(201).json({ token, user: { id: user.id, businessName: user.businessName, email: user.email } });
+}));
+
+app.post('/api/auth/login', handle(async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'email and password are required' });
+  const user = await store.users.findByEmail(email);
+  if (!user || !auth.verifyPassword(password, user.salt, user.hash)) {
+    return res.status(401).json({ error: 'Incorrect email or password.' });
+  }
+  const token = auth.generateToken();
+  await store.sessions.insert({ token, userId: user.id, ts: Date.now() });
+  res.json({ token, user: { id: user.id, businessName: user.businessName, email: user.email } });
+}));
+
+app.post('/api/auth/logout', handle(async (req, res) => {
+  const { token } = req.body || {};
+  if (token) await store.sessions.removeByToken(token);
+  res.status(204).end();
+}));
+
+app.get('/api/auth/me', handle(async (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'No token provided' });
+  const session = await store.sessions.findByToken(token);
+  if (!session) return res.status(401).json({ error: 'Session expired or invalid' });
+  const user = await store.users.findById(session.userId);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+  res.json({ user: { id: user.id, businessName: user.businessName, email: user.email } });
+}));
 
 // ---------------------------------------------------------------
 // Fleet positions (Sprint 3 GPS-ready architecture)

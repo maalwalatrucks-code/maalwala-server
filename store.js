@@ -21,6 +21,8 @@ const FILES = {
   savedSearches: path.join(DATA_DIR, 'savedSearches.json'),
   positions: path.join(DATA_DIR, 'positions.json'),
   records: path.join(DATA_DIR, 'records.json'),
+  users: path.join(DATA_DIR, 'users.json'),
+  sessions: path.join(DATA_DIR, 'sessions.json'),
 };
 
 function readJSON(file, fallback) {
@@ -117,5 +119,19 @@ module.exports = {
     insert: (item) => insertOne(FILES.records, item),
     removeById: (idVal) => removeById(FILES.records, idVal),
     updateById: (idVal, patch) => updateById(FILES.records, idVal, patch),
+  },
+  users: {
+    all: () => listAll(FILES.users),
+    findByEmail: (email) => listAll(FILES.users).find((u) => u.email.toLowerCase() === String(email).toLowerCase()) || null,
+    findById: (idVal) => listAll(FILES.users).find((u) => u.id === idVal) || null,
+    insert: (item) => insertOne(FILES.users, item),
+  },
+  sessions: {
+    insert: (item) => insertOne(FILES.sessions, item),
+    findByToken: (token) => listAll(FILES.sessions).find((s) => s.token === token) || null,
+    removeByToken: (token) => {
+      const list = listAll(FILES.sessions).filter((s) => s.token !== token);
+      writeJSON(FILES.sessions, list);
+    },
   },
 };
