@@ -26,10 +26,26 @@ async function generateAccessToken() {
       password: process.env.ADITI_PASSWORD,
     }),
   });
-  const data = await res.json().catch(() => ({}));
-  const token = data?.data?.[0]?.token || data?.token;
+  const rawText = await res.text();
+  let data = {};
+  try { data = JSON.parse(rawText); } catch (e) { /* leave data as {} */ }
+
+  // Their docs' example response shape isn't 100% precise from a screenshot,
+  // so try every reasonable place a token might live before giving up.
+  const token =
+    (typeof data?.data === 'string' && data.data) ||
+    data?.data?.[0]?.token ||
+    data?.data?.token ||
+    data?.token ||
+    data?.[0]?.data ||
+    data?.[0]?.token ||
+    null;
+
   if (!res.ok || !token) {
-    throw new Error('Could not get an access token from Aditi Tracking — check ADITI_USERNAME/ADITI_PASSWORD.');
+    // Log the real shape server-side (Render → Logs) without exposing
+    // credentials, so this can actually be debugged if it fails again.
+    console.error('Aditi generateAccessToken failed. HTTP status:', res.status, 'Response body:', rawText.slice(0, 500));
+    throw new Error(`Could not get an access token from Aditi Tracking (HTTP ${res.status}). Check ADITI_USERNAME/ADITI_PASSWORD are correct, and check the Render logs for the exact response Aditi sent back.`);
   }
   return token;
 }
