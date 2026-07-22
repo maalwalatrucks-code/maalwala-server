@@ -88,18 +88,39 @@ async function getLiveData(vehicleNumbers) {
     res = await callOnce(token);
   }
 
-  const data = await res.json().catch(() => ({}));
+  const rawText = await res.text();
+  let data = {};
+  try { data = JSON.parse(rawText); } catch (e) { /* leave data as {} */ }
+
   if (!res.ok) {
+    console.error('Aditi getLiveData HTTP error. Status:', res.status, 'Body:', rawText.slice(0, 800));
     throw new Error(data?.message || `Aditi Tracking request failed (HTTP ${res.status})`);
   }
 
-  const rows = data?.root?.[0]?.VehicleData || data?.VehicleData || [];
+  // Same situation as the token endpoint: their docs show a screenshot, not an
+  // exact spec, so try every plausible place the vehicle array could be.
+  const rows =
+    data?.root?.[0]?.VehicleData ||
+    data?.root?.VehicleData ||
+    data?.VehicleData ||
+    data?.data?.[0]?.VehicleData ||
+    data?.data?.VehicleData ||
+    (Array.isArray(data?.root) ? data.root : null) ||
+    [];
+
+  if (!rows.length) {
+    // Log the real response shape so this is debuggable from Render's logs
+    // instead of guessing again — this is the single most useful line if
+    // vehicles still don't match after this fix.
+    console.error('Aditi getLiveData returned no rows we could parse. Raw response:', rawText.slice(0, 1500));
+  }
+
   return rows.map((r) => ({
-    vehicleNumber: (r.Vehicle_No || '').toUpperCase(),
-    lat: parseFloat(r.Latitude),
-    lng: parseFloat(r.Longitude),
-    speed: r.Speed != null ? parseFloat(r.Speed) : null,
-    datetime: r.Datetime || null,
+    vehicleNumber: (r.Vehicle_No || r.VehicleNo || r.Vehicle_Number || r.Registration || '').toString().toUpperCase(),
+    lat: parseFloat(r.Latitude ?? r.latitude ?? r.lat),
+    lng: parseFloat(r.Longitude ?? r.longitude ?? r.lng),
+    speed: (r.Speed ?? r.speed) != null ? parseFloat(r.Speed ?? r.speed) : null,
+    datetime: r.Datetime || r.datetime || null,
   })).filter((r) => !isNaN(r.lat) && !isNaN(r.lng));
 }
 

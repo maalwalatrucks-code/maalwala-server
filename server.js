@@ -105,6 +105,9 @@ app.get('/api/fleet/aditi-status', (req, res) => {
 // Pull-model sync: ask Aditi Tracking for current positions of every posted
 // truck that has a vehicleNumber set, then feed each one into the same
 // positions store the driver-tracking page and /api/fleet/ping use.
+function normalizePlate(s) {
+  return (s || '').toString().toUpperCase().replace(/[\s-]/g, '');
+}
 app.post('/api/fleet/sync-aditi', handle(async (req, res) => {
   if (!aditi.isConfigured()) {
     return res.status(400).json({ error: 'Aditi Tracking is not configured on this server yet.' });
@@ -116,11 +119,12 @@ app.post('/api/fleet/sync-aditi', handle(async (req, res) => {
 
   const vehicleNumbers = trucks.map((t) => t.vehicleNumber);
   const rows = await aditi.getLiveData(vehicleNumbers);
+  console.log(`Aditi sync: requested ${vehicleNumbers.length} vehicle(s), got ${rows.length} row(s) back. Vehicle numbers in response:`, rows.map((r) => r.vehicleNumber));
 
   let synced = 0;
   const notFound = [];
   for (const truck of trucks) {
-    const match = rows.find((r) => r.vehicleNumber === truck.vehicleNumber);
+    const match = rows.find((r) => normalizePlate(r.vehicleNumber) === normalizePlate(truck.vehicleNumber));
     if (match) {
       await store.positions.insert({ truckId: truck.id, lat: match.lat, lng: match.lng, speed: match.speed, ts: Date.now() });
       synced++;
@@ -128,7 +132,7 @@ app.post('/api/fleet/sync-aditi', handle(async (req, res) => {
       notFound.push(truck.vehicleNumber);
     }
   }
-  res.json({ synced, requested: vehicleNumbers.length, notFound });
+  res.json({ synced, requested: vehicleNumbers.length, notFound, rowsReturned: rows.length });
 }));
 
 // ---------------------------------------------------------------
@@ -180,6 +184,18 @@ app.post('/api/trucks', handle(async (req, res) => {
 app.delete('/api/trucks/:id', handle(async (req, res) => {
   await store.trucks.removeById(req.params.id);
   res.status(204).end();
+}));
+
+app.patch('/api/trucks/:id', handle(async (req, res) => {
+  const b = req.body || {};
+  const patch = {};
+  // Only allow editing a safe, specific set of fields this way.
+  ['vehicleNumber', 'driverName', 'driverPhone', 'to', 'date'].forEach((key) => {
+    if (b[key] !== undefined) patch[key] = key === 'vehicleNumber' ? String(b[key]).toUpperCase() : b[key];
+  });
+  const updated = await store.trucks.updateById(req.params.id, patch);
+  if (!updated) return res.status(404).json({ error: 'Truck not found' });
+  res.json(updated);
 }));
 
 // ---------------------------------------------------------------
