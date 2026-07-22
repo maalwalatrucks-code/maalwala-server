@@ -115,13 +115,24 @@ async function getLiveData(vehicleNumbers) {
     console.error('Aditi getLiveData returned no rows we could parse. Raw response:', rawText.slice(0, 1500));
   }
 
-  return rows.map((r) => ({
-    vehicleNumber: (r.Vehicle_No || r.VehicleNo || r.Vehicle_Number || r.Registration || '').toString().toUpperCase(),
-    lat: parseFloat(r.Latitude ?? r.latitude ?? r.lat),
-    lng: parseFloat(r.Longitude ?? r.longitude ?? r.lng),
-    speed: (r.Speed ?? r.speed) != null ? parseFloat(r.Speed ?? r.speed) : null,
-    datetime: r.Datetime || r.datetime || null,
-  })).filter((r) => !isNaN(r.lat) && !isNaN(r.lng));
+  return rows.map((r) => {
+    const driverName = [r.Driver_First_Name, r.Driver_Middle_Name, r.Driver_Last_Name]
+      .filter(n => n && n !== '--').join(' ');
+    return {
+      vehicleNumber: (r.Vehicle_No || r.VehicleNo || r.Vehicle_Number || r.Registration || '').toString().toUpperCase(),
+      lat: parseFloat(r.Latitude ?? r.latitude ?? r.lat),
+      lng: parseFloat(r.Longitude ?? r.longitude ?? r.lng),
+      speed: (r.Speed ?? r.speed) != null ? parseFloat(r.Speed ?? r.speed) : null,
+      datetime: r.Datetime || r.datetime || null,
+      status: r.Status || null,                 // Running / Idle / Stopped / Inactive / NoData
+      ignition: r.IGN === 'ON' ? true : r.IGN === 'OFF' ? false : null,
+      odometer: r.Odometer != null ? parseFloat(r.Odometer) : null,
+      sos: Boolean(r.SOS && r.SOS !== '--'),
+      driverName: driverName || null,
+      batteryPercent: r.battery_percentage != null ? parseFloat(r.battery_percentage) : null,
+      vehicleType: r.Vehicletype || null,
+    };
+  }).filter((r) => !isNaN(r.lat) && !isNaN(r.lng));
 }
 
 module.exports = { isConfigured, getLiveData };

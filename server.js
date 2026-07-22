@@ -126,7 +126,11 @@ app.post('/api/fleet/sync-aditi', handle(async (req, res) => {
   for (const truck of trucks) {
     const match = rows.find((r) => normalizePlate(r.vehicleNumber) === normalizePlate(truck.vehicleNumber));
     if (match) {
-      await store.positions.insert({ truckId: truck.id, lat: match.lat, lng: match.lng, speed: match.speed, ts: Date.now() });
+      await store.positions.insert({
+        truckId: truck.id, lat: match.lat, lng: match.lng, speed: match.speed, ts: Date.now(),
+        status: match.status, ignition: match.ignition, odometer: match.odometer,
+        sos: match.sos, driverName: match.driverName, batteryPercent: match.batteryPercent,
+      });
       synced++;
     } else {
       notFound.push(truck.vehicleNumber);
