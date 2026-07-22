@@ -4,6 +4,7 @@ const cors = require('cors');
 const store = require('./store');
 const whatsapp = require('./whatsapp');
 const auth = require('./auth');
+const aditi = require('./aditi');
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
@@ -97,6 +98,39 @@ app.post('/api/fleet/ping', handle(async (req, res) => {
   res.status(201).json(ping);
 }));
 
+app.get('/api/fleet/aditi-status', (req, res) => {
+  res.json({ configured: aditi.isConfigured() });
+});
+
+// Pull-model sync: ask Aditi Tracking for current positions of every posted
+// truck that has a vehicleNumber set, then feed each one into the same
+// positions store the driver-tracking page and /api/fleet/ping use.
+app.post('/api/fleet/sync-aditi', handle(async (req, res) => {
+  if (!aditi.isConfigured()) {
+    return res.status(400).json({ error: 'Aditi Tracking is not configured on this server yet.' });
+  }
+  const trucks = (await store.trucks.all()).filter((t) => t.vehicleNumber);
+  if (!trucks.length) {
+    return res.json({ synced: 0, note: 'No posted trucks have a vehicle number set yet.' });
+  }
+
+  const vehicleNumbers = trucks.map((t) => t.vehicleNumber);
+  const rows = await aditi.getLiveData(vehicleNumbers);
+
+  let synced = 0;
+  const notFound = [];
+  for (const truck of trucks) {
+    const match = rows.find((r) => r.vehicleNumber === truck.vehicleNumber);
+    if (match) {
+      await store.positions.insert({ truckId: truck.id, lat: match.lat, lng: match.lng, speed: match.speed, ts: Date.now() });
+      synced++;
+    } else {
+      notFound.push(truck.vehicleNumber);
+    }
+  }
+  res.json({ synced, requested: vehicleNumbers.length, notFound });
+}));
+
 // ---------------------------------------------------------------
 // Loads
 // ---------------------------------------------------------------
@@ -137,6 +171,7 @@ app.post('/api/trucks', handle(async (req, res) => {
     truckType: b.truckType, capacity: b.capacity, date: b.date || null,
     poster: b.poster || 'Unknown', phone: b.phone || '',
     driverName: b.driverName || '', driverPhone: b.driverPhone || '',
+    vehicleNumber: (b.vehicleNumber || '').toUpperCase(),
     verified: Boolean(b.verified), ts: Date.now(),
   };
   res.status(201).json(await store.trucks.insert(item));
