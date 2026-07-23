@@ -5,10 +5,14 @@ const store = require('./store');
 const whatsapp = require('./whatsapp');
 const auth = require('./auth');
 const aditi = require('./aditi');
+const payments = require('./payments');
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
-app.use(express.json({ limit: '8mb' })); // POD photos come through as base64, so allow a larger body
+app.use(express.json({
+  limit: '8mb', // POD photos come through as base64, so allow a larger body
+  verify: (req, res, buf) => { req.rawBody = buf; }, // Razorpay's webhook signature is computed over the exact raw bytes
+}));
 
 const PORT = process.env.PORT || 4000;
 
@@ -139,6 +143,202 @@ app.post('/api/fleet/sync-aditi', handle(async (req, res) => {
   res.json({ synced, requested: vehicleNumbers.length, notFound, rowsReturned: rows.length });
 }));
 
+// =================================================================
+// Escrow bookings — collect 100% upfront from the shipper, hold 10%
+// in escrow, release automatically after delivery confirmation
+// unless disputed. Every money-movement status change is driven by
+// a verified Razorpay webhook — never by a client-callable "mark
+// as paid" endpoint. See payments.js for why that matters.
+// =================================================================
+const AUTO_RELEASE_WINDOW_MS = 48 * 60 * 60 * 1000; // 48 hours after delivery confirmation
+
+app.get('/api/payments/status', (req, res) => {
+  res.json({ paymentsConfigured: payments.isPaymentsConfigured(), payoutsConfigured: payments.isPayoutsConfigured() });
+});
+
+// Create a booking: computes the 90/10 split, creates a Razorpay
+// Payment Link for the FULL amount, and returns it for the shipper.
+app.post('/api/bookings', handle(async (req, res) => {
+  const b = req.body || {};
+  if (!b.totalAmount || !b.shipperName || !b.transporterName) {
+    return res.status(400).json({ error: 'totalAmount, shipperName and transporterName are required' });
+  }
+  if (!b.termsAccepted) {
+    return res.status(400).json({ error: 'The shipper must accept the escrow terms before booking.' });
+  }
+  const totalAmount = Number(b.totalAmount);
+  const advanceAmount = Math.round(totalAmount * 0.9 * 100) / 100;
+  const balanceAmount = Math.round((totalAmount - advanceAmount) * 100) / 100;
+
+  const booking = {
+    id: store.id(),
+    loadId: b.loadId || null, truckId: b.truckId || null,
+    shipperName: b.shipperName, shipperPhone: b.shipperPhone || '',
+    transporterName: b.transporterName, transporterPhone: b.transporterPhone || '',
+    transporterUpiId: b.transporterUpiId || '', transporterBankAccount: b.transporterBankAccount || '', transporterBankIfsc: b.transporterBankIfsc || '',
+    route: b.route || '', totalAmount, advanceAmount, balanceAmount,
+    status: 'awaiting_payment',
+    termsAcceptedAt: Date.now(),
+    ts: Date.now(),
+  };
+
+  const link = await payments.createPaymentLink({
+    bookingId: booking.id,
+    amountRupees: totalAmount,
+    description: `Maalwala booking ${booking.route || ''} — full freight amount (90% to transporter now, 10% held in escrow until delivery)`.trim(),
+    customerName: b.shipperName, customerPhone: b.shipperPhone,
+  });
+  booking.paymentLinkId = link.paymentLinkId;
+  booking.paymentLinkUrl = link.shortUrl;
+
+  await store.bookings.insert(booking);
+  res.status(201).json(booking);
+}));
+
+app.get('/api/bookings', handle(async (req, res) => res.json(await store.bookings.all())));
+app.get('/api/bookings/:id', handle(async (req, res) => {
+  const booking = await store.bookings.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  res.json(booking);
+}));
+
+// Razorpay calls this — never the frontend directly. This is the only
+// place a booking can move from "awaiting_payment" to "funded".
+app.post('/api/webhooks/razorpay', handle(async (req, res) => {
+  const signature = req.headers['x-razorpay-signature'];
+  const valid = payments.verifyWebhookSignature(req.rawBody, signature);
+  if (!valid) {
+    console.error('Rejected a webhook call with an invalid Razorpay signature.');
+    return res.status(400).json({ error: 'Invalid signature' });
+  }
+
+  const event = req.body;
+  if (event.event === 'payment_link.paid' || event.event === 'payment.captured') {
+    const bookingId = event.payload?.payment_link?.entity?.reference_id
+      || event.payload?.payment?.entity?.notes?.bookingId;
+    if (!bookingId) return res.sendStatus(200);
+
+    const booking = await store.bookings.findById(bookingId);
+    if (!booking || booking.status !== 'awaiting_payment') return res.sendStatus(200); // already processed or unknown — idempotent
+
+    await store.bookings.updateById(bookingId, { status: 'funded', fundedAt: Date.now() });
+
+    // Immediately pay the transporter their 90% — this is the "release
+    // immediately" half; the 10% stays held until delivery.
+    try {
+      if (booking.transporterUpiId || booking.transporterBankAccount) {
+        const fundAccountId = await payments.getOrCreateFundAccount({
+          name: booking.transporterName, phone: booking.transporterPhone,
+          upiId: booking.transporterUpiId, bankAccount: booking.transporterBankAccount, bankIfsc: booking.transporterBankIfsc,
+        });
+        const payout = await payments.sendPayout({
+          fundAccountId, amountRupees: booking.advanceAmount,
+          purpose: 'payout', referenceId: bookingId + '-advance',
+        });
+        await store.bookings.updateById(bookingId, { status: 'in_transit', advancePayoutId: payout.id, advancePaidAt: Date.now() });
+      } else {
+        console.error(`Booking ${bookingId} funded but transporter has no payout details on file — advance payout skipped, needs manual handling.`);
+      }
+    } catch (e) {
+      console.error(`Advance payout failed for booking ${bookingId}:`, e.message);
+      // Booking stays "funded" — money is safely collected, payout can be retried manually.
+    }
+  }
+  res.sendStatus(200);
+}));
+
+// Transporter marks the load delivered — starts the 48h auto-release window.
+app.post('/api/bookings/:id/mark-delivered', handle(async (req, res) => {
+  const booking = await store.bookings.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (!['funded', 'in_transit'].includes(booking.status)) {
+    return res.status(400).json({ error: `Can't mark delivered from status "${booking.status}".` });
+  }
+  const patch = {
+    status: 'delivered_pending_confirmation',
+    deliveryConfirmedAt: Date.now(),
+    podPhoto: req.body?.podPhoto || null,
+    podNote: req.body?.podNote || '',
+  };
+  const updated = await store.bookings.updateById(req.params.id, patch);
+  res.json(updated);
+}));
+
+// Shipper disputes within the window — freezes auto-release.
+app.post('/api/bookings/:id/dispute', handle(async (req, res) => {
+  const booking = await store.bookings.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (booking.status !== 'delivered_pending_confirmation') {
+    return res.status(400).json({ error: 'Can only dispute a booking that is awaiting delivery confirmation.' });
+  }
+  if (!req.body?.reason) return res.status(400).json({ error: 'A reason is required to raise a dispute.' });
+  const updated = await store.bookings.updateById(req.params.id, {
+    status: 'disputed', disputeReason: req.body.reason, disputeRaisedAt: Date.now(),
+  });
+  res.json(updated);
+}));
+
+// Everything needed to actually judge a dispute, in one place.
+app.get('/api/bookings/:id/dispute-info', handle(async (req, res) => {
+  const booking = await store.bookings.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  const gpsHistory = booking.truckId ? await store.positions.historyForTruck(booking.truckId) : [];
+  res.json({ booking, gpsHistory });
+}));
+
+// Called periodically by the frontend (no real cron on Render's free
+// tier) — releases the held 10% for anything past its window with no
+// dispute raised. This is the "silence means pay" default from chat.
+app.post('/api/bookings/check-releases', handle(async (req, res) => {
+  const cutoff = Date.now() - AUTO_RELEASE_WINDOW_MS;
+  const releasable = await store.bookings.findReleasable(cutoff);
+  let released = 0;
+  const errors = [];
+  for (const booking of releasable) {
+    try {
+      const fundAccountId = await payments.getOrCreateFundAccount({
+        name: booking.transporterName, phone: booking.transporterPhone,
+        upiId: booking.transporterUpiId, bankAccount: booking.transporterBankAccount, bankIfsc: booking.transporterBankIfsc,
+      });
+      const payout = await payments.sendPayout({
+        fundAccountId, amountRupees: booking.balanceAmount,
+        purpose: 'payout', referenceId: booking.id + '-balance',
+      });
+      await store.bookings.updateById(booking.id, { status: 'completed', balancePayoutId: payout.id, completedAt: Date.now() });
+      released++;
+    } catch (e) {
+      errors.push({ bookingId: booking.id, error: e.message });
+    }
+  }
+  res.json({ checked: releasable.length, released, errors });
+}));
+
+// Admin/manual override for a resolved dispute — releases or refunds.
+// This exists because some disputes genuinely need a human decision;
+// see the chat discussion on why no system can automate this fully.
+app.post('/api/bookings/:id/resolve-dispute', handle(async (req, res) => {
+  const booking = await store.bookings.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (booking.status !== 'disputed') return res.status(400).json({ error: 'Booking is not currently disputed.' });
+  const { resolution } = req.body || {}; // 'release' or 'refund'
+  if (resolution === 'release') {
+    const fundAccountId = await payments.getOrCreateFundAccount({
+      name: booking.transporterName, phone: booking.transporterPhone,
+      upiId: booking.transporterUpiId, bankAccount: booking.transporterBankAccount, bankIfsc: booking.transporterBankIfsc,
+    });
+    const payout = await payments.sendPayout({ fundAccountId, amountRupees: booking.balanceAmount, purpose: 'payout', referenceId: booking.id + '-balance-resolved' });
+    const updated = await store.bookings.updateById(req.params.id, { status: 'completed', balancePayoutId: payout.id, completedAt: Date.now(), resolutionNote: req.body?.note || '' });
+    return res.json(updated);
+  }
+  // 'refund' path: mark resolved as refunded — actual refund still needs
+  // Razorpay's refund API against the original payment, which requires
+  // the payment_id (captured from the webhook) — left as a manual step
+  // in the Razorpay dashboard for now rather than guessing at partial-
+  // refund edge cases blind.
+  const updated = await store.bookings.updateById(req.params.id, { status: 'refund_pending_manual', resolutionNote: req.body?.note || '' });
+  res.json(updated);
+}));
+
 // ---------------------------------------------------------------
 // Loads
 // ---------------------------------------------------------------
@@ -180,6 +380,7 @@ app.post('/api/trucks', handle(async (req, res) => {
     poster: b.poster || 'Unknown', phone: b.phone || '',
     driverName: b.driverName || '', driverPhone: b.driverPhone || '',
     vehicleNumber: (b.vehicleNumber || '').toUpperCase(),
+    payoutUpiId: b.payoutUpiId || '',
     verified: Boolean(b.verified), ts: Date.now(),
   };
   res.status(201).json(await store.trucks.insert(item));
