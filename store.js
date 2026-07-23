@@ -34,6 +34,11 @@ async function col(name) {
 function id() {
   return 'id' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
+// Strips everything except digits and keeps the last 10 — so "+91 98765-43210",
+// "9876543210", and "919876543210" all match the same user.
+function normalizePhoneForLookup(phone) {
+  return String(phone || '').replace(/\D/g, '').slice(-10);
+}
 
 // ---------- Generic helpers ----------
 async function listAll(name, sort = { ts: -1 }) {
@@ -156,13 +161,29 @@ module.exports = {
     findByEmail: async (email) => {
       const c = await col('users');
       const all = await c.find({}, { projection: { _id: 0 } }).toArray();
-      return all.find((u) => u.email.toLowerCase() === String(email).toLowerCase()) || null;
+      return all.find((u) => u.email && u.email.toLowerCase() === String(email).toLowerCase()) || null;
+    },
+    findByPhone: async (phone) => {
+      const c = await col('users');
+      return c.findOne({ phone: normalizePhoneForLookup(phone) }, { projection: { _id: 0 } });
     },
     findById: async (idVal) => {
       const c = await col('users');
       return c.findOne({ id: idVal }, { projection: { _id: 0 } });
     },
     insert: (item) => insertOne('users', item),
+  },
+  otps: {
+    insert: (item) => insertOne('otps', item),
+    findLatestForPhone: async (phone) => {
+      const c = await col('otps');
+      const all = await c.find({ phone: normalizePhoneForLookup(phone) }, { projection: { _id: 0 } }).sort({ ts: -1 }).limit(1).toArray();
+      return all[0] || null;
+    },
+    removeForPhone: async (phone) => {
+      const c = await col('otps');
+      await c.deleteMany({ phone: normalizePhoneForLookup(phone) });
+    },
   },
   sessions: {
     insert: (item) => insertOne('sessions', item),

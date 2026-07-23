@@ -77,7 +77,66 @@ app.get('/api/auth/me', handle(async (req, res) => {
   if (!session) return res.status(401).json({ error: 'Session expired or invalid' });
   const user = await store.users.findById(session.userId);
   if (!user) return res.status(401).json({ error: 'User not found' });
-  res.json({ user: { id: user.id, businessName: user.businessName, email: user.email } });
+  res.json({ user: { id: user.id, businessName: user.businessName, email: user.email, phone: user.phone } });
+}));
+
+// ---------------------------------------------------------------
+// OTP login (mobile number) — sent via the WhatsApp Cloud API, no
+// SMS vendor needed. This is now the primary way into the whole site.
+// ---------------------------------------------------------------
+const OTP_COOLDOWN_MS = 45 * 1000;      // don't let someone spam-request codes
+const OTP_EXPIRY_MS = 10 * 60 * 1000;   // codes are valid for 10 minutes
+
+app.post('/api/auth/request-otp', handle(async (req, res) => {
+  const { phone } = req.body || {};
+  const normalized = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (normalized.length !== 10) return res.status(400).json({ error: 'Enter a valid 10-digit mobile number.' });
+
+  const existing = await store.otps.findLatestForPhone(normalized);
+  if (existing && Date.now() - existing.ts < OTP_COOLDOWN_MS) {
+    return res.status(429).json({ error: 'Please wait a few seconds before requesting another code.' });
+  }
+
+  const code = auth.generateOtp();
+  await store.otps.insert({ id: store.id(), phone: normalized, codeHash: auth.hashOtp(code), ts: Date.now(), used: false });
+
+  if (whatsapp.isConfigured()) {
+    try {
+      await whatsapp.sendTextMessage(normalized, `Your Maalwala login code is: ${code}\n\nValid for 10 minutes. Don't share this with anyone.`);
+      return res.json({ sent: true, via: 'whatsapp' });
+    } catch (e) {
+      console.error('OTP WhatsApp send failed:', e.message);
+      // fall through to dev-mode response below
+    }
+  }
+  // WhatsApp isn't configured (or the send failed) — rather than lock
+  // everyone out of the site, return the code directly with a loud
+  // warning. This must never happen once WhatsApp is actually set up.
+  console.warn(`⚠️  DEV MODE: WhatsApp not configured — OTP for ${normalized} is ${code}`);
+  res.json({ sent: true, via: 'dev-fallback', devCode: code, warning: 'WhatsApp is not configured on this server — showing the code directly. Set WHATSAPP_TOKEN/WHATSAPP_PHONE_NUMBER_ID before going live, or nobody else can log in.' });
+}));
+
+app.post('/api/auth/verify-otp', handle(async (req, res) => {
+  const { phone, code } = req.body || {};
+  const normalized = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (!normalized || !code) return res.status(400).json({ error: 'Phone and code are required.' });
+
+  const record = await store.otps.findLatestForPhone(normalized);
+  if (!record) return res.status(400).json({ error: 'No code was requested for this number — request one first.' });
+  if (record.used) return res.status(400).json({ error: 'This code has already been used. Request a new one.' });
+  if (Date.now() - record.ts > OTP_EXPIRY_MS) return res.status(400).json({ error: 'This code has expired. Request a new one.' });
+  if (!auth.verifyOtp(String(code), record.codeHash)) return res.status(401).json({ error: 'Incorrect code.' });
+
+  await store.otps.removeForPhone(normalized); // single-use
+
+  let user = await store.users.findByPhone(normalized);
+  if (!user) {
+    user = { id: store.id(), phone: normalized, businessName: '', email: '', ts: Date.now() };
+    await store.users.insert(user);
+  }
+  const token = auth.generateToken();
+  await store.sessions.insert({ token, userId: user.id, ts: Date.now() });
+  res.json({ token, user: { id: user.id, businessName: user.businessName, email: user.email, phone: user.phone } });
 }));
 
 // ---------------------------------------------------------------

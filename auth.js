@@ -20,4 +20,17 @@ function generateToken() {
   return crypto.randomBytes(32).toString('hex');
 }
 
-module.exports = { hashPassword, verifyPassword, generateToken };
+// ---------- OTP (mobile login) ----------
+function generateOtp() {
+  return String(crypto.randomInt(100000, 1000000)); // 6 digits, 100000-999999
+}
+function hashOtp(code) {
+  return crypto.createHash('sha256').update(code).digest('hex');
+}
+function verifyOtp(code, hash) {
+  const a = Buffer.from(hashOtp(code), 'hex');
+  const b = Buffer.from(hash, 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+module.exports = { hashPassword, verifyPassword, generateToken, generateOtp, hashOtp, verifyOtp };
