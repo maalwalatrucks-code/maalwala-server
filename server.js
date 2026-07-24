@@ -102,7 +102,7 @@ app.post('/api/auth/request-otp', handle(async (req, res) => {
 
   if (whatsapp.isConfigured()) {
     try {
-      await whatsapp.sendTextMessage(normalized, `Your Maalwala login code is: ${code}\n\nValid for 10 minutes. Don't share this with anyone.`);
+      await whatsapp.sendTextMessage('91' + normalized, `Your Maalwala login code is: ${code}\n\nValid for 10 minutes. Don't share this with anyone.`);
       return res.json({ sent: true, via: 'whatsapp' });
     } catch (e) {
       console.error('OTP WhatsApp send failed:', e.message);
