@@ -219,6 +219,30 @@ app.get('/api/payments/status', (req, res) => {
 // Payment Link for the FULL amount, and returns it for the shipper.
 app.post('/api/bookings', handle(async (req, res) => {
   const b = req.body || {};
+    if (b.loadId) {
+          if (!b.transporterName || !b.vehicleNumber || !b.driverName || !b.driverPhone || !b.transporterUpiId) {
+                  return res.status(400).json({ error: 'transporterName, vehicleNumber, driverName, driverPhone and transporterUpiId are required.' });
+          }
+          const loads = await store.loads.all();
+          const load = loads.find((l) => l.id === b.loadId);
+          if (!load) return res.status(404).json({ error: 'That load no longer exists.' });
+          const totalAmount = Number(load.rate) || 0;
+          const advanceAmount = Math.round(totalAmount * 0.9 * 100) / 100;
+          const balanceAmount = Math.round((totalAmount - advanceAmount) * 100) / 100;
+          const loadBooking = {
+                  id: store.id(),
+                  loadId: load.id, truckId: null,
+                  shipperName: load.poster || '', shipperPhone: load.phone || '',
+                  transporterName: b.transporterName, transporterPhone: b.transporterPhone || '',
+                  transporterUpiId: b.transporterUpiId, transporterBankAccount: b.transporterBankAccount || '', transporterBankIfsc: b.transporterBankIfsc || '',
+                  vehicleNumber: String(b.vehicleNumber).toUpperCase(), driverName: b.driverName, driverPhone: b.driverPhone,
+                  route: `${load.from} → ${load.to}`, totalAmount, advanceAmount, balanceAmount,
+                  status: 'booked',
+                  ts: Date.now(),
+          };
+          await store.bookings.insert(loadBooking);
+          return res.status(201).json(loadBooking);
+    }
   if (!b.totalAmount || !b.shipperName || !b.transporterName) {
     return res.status(400).json({ error: 'totalAmount, shipperName and transporterName are required' });
   }
