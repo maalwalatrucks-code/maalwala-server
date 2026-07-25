@@ -276,6 +276,7 @@ app.post('/api/bookings', handle(async (req, res) => {
 
   await store.bookings.insert(booking);
   res.status(201).json(booking);
+}));
 
   // Shipper confirms the truck has actually been loaded and the e-way bill
   // is in hand. THIS is what triggers payment — the Razorpay link is
