@@ -276,7 +276,34 @@ app.post('/api/bookings', handle(async (req, res) => {
 
   await store.bookings.insert(booking);
   res.status(201).json(booking);
-}));
+
+  // Shipper confirms the truck has actually been loaded and the e-way bill
+  // is in hand. THIS is what triggers payment — the Razorpay link is
+  // created here, for the first time, not at booking creation.
+  app.post('/api/bookings/:id/mark-loaded', handle(async (req, res) => {
+      const booking = await store.bookings.findById(req.params.id);
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      if (booking.status !== 'booked') {
+            return res.status(400).json({ error: `Can't mark loaded from status "${booking.status}".` });
+      }
+      if (!req.body?.ewayBillNumber) {
+            return res.status(400).json({ error: 'E-way bill number is required before payment can be requested.' });
+      }
+      const link = await payments.createPaymentLink({
+            bookingId: booking.id,
+            amountRupees: booking.totalAmount,
+            description: `Maalwala booking ${booking.route || ''} — full freight amount (90% to transporter now, 10% held in escrow until delivery)`.trim(),
+            customerName: booking.shipperName, customerPhone: booking.shipperPhone,
+      });
+      const updated = await store.bookings.updateById(req.params.id, {
+            status: 'awaiting_payment',
+            ewayBillNumber: req.body.ewayBillNumber,
+            loadedAt: Date.now(),
+            paymentLinkId: link.paymentLinkId,
+            paymentLinkUrl: link.shortUrl,
+      });
+      res.json(updated);
+  }));
 
 app.get('/api/bookings', handle(async (req, res) => res.json(await store.bookings.all())));
 app.get('/api/bookings/:id', handle(async (req, res) => {
