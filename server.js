@@ -700,10 +700,21 @@ app.delete('/api/saved-searches/:id', handle(async (req, res) => {
 // ---------------------------------------------------------------
 // Profile
 // ---------------------------------------------------------------
-app.get('/api/profile', handle(async (req, res) => res.json(await store.profile.get())));
+app.get('/api/profile', handle(async (req, res) => {
+  const phone = String(req.query.phone || '').replace(/\D/g, '').slice(-10);
+  if (!phone) return res.json(await store.profile.get());
+  const p = await store.profile.getByPhone(phone);
+  res.json(p || { name: '', role: 'Transporter', city: '', phone: '', gst: '', drivers: [] });
+}));
 app.post('/api/profile', handle(async (req, res) => {
-  await store.profile.save(req.body || {});
-  res.json(await store.profile.get());
+  const body = req.body || {};
+  const phone = String(body.phone || '').replace(/\D/g, '').slice(-10);
+  if (!phone) {
+    await store.profile.save(body);
+    return res.json(await store.profile.get());
+  }
+  await store.profile.saveByPhone(phone, body);
+  res.json(body);
 }));
 
 // ---------------------------------------------------------------

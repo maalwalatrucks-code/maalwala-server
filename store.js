@@ -69,6 +69,15 @@ async function saveSingleton(name, value) {
   const c = await col(name);
   await c.updateOne({ _key: 'singleton' }, { $set: { ...value, _key: 'singleton' } }, { upsert: true });
 }
+async function getByKey(name, key, fallback) {
+  const c = await col(name);
+  const doc = await c.findOne({ _key: key }, { projection: { _id: 0, _key: 0 } });
+  return doc || fallback;
+}
+async function saveByKey(name, key, value) {
+  const c = await col(name);
+  await c.updateOne({ _key: key }, { $set: { ...value, _key: key } }, { upsert: true });
+}
 
 module.exports = {
   id,
@@ -101,6 +110,8 @@ module.exports = {
   profile: {
     get: () => getSingleton('profile', { name: '', role: 'Transporter', city: '', phone: '', gst: '', drivers: [] }),
     save: (p) => saveSingleton('profile', p),
+    getByPhone: (phone) => getByKey('profiles', phone, null),
+    saveByPhone: (phone, p) => saveByKey('profiles', phone, p),
   },
   savedSearches: {
     all: () => listAll('savedSearches'),
