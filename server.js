@@ -86,6 +86,7 @@ app.get('/api/auth/me', handle(async (req, res) => {
 // ---------------------------------------------------------------
 const OTP_COOLDOWN_MS = 45 * 1000;      // don't let someone spam-request codes
 const OTP_EXPIRY_MS = 10 * 60 * 1000;   // codes are valid for 10 minutes
+const DEV_OTP_ALLOWLIST = (process.env.DEV_OTP_ALLOWLIST || '9586377621,9913340394').split(',').map(s => s.trim()).filter(Boolean);
 
 app.post('/api/auth/request-otp', handle(async (req, res) => {
   const { phone } = req.body || {};
@@ -113,7 +114,10 @@ app.post('/api/auth/request-otp', handle(async (req, res) => {
   // everyone out of the site, return the code directly with a loud
   // warning. This must never happen once WhatsApp is actually set up.
   console.warn(`⚠️  DEV MODE: WhatsApp not configured — OTP for ${normalized} is ${code}`);
-  res.json({ sent: true, via: 'dev-fallback', devCode: code, warning: 'WhatsApp is not configured on this server — showing the code directly. Set WHATSAPP_TOKEN/WHATSAPP_PHONE_NUMBER_ID before going live, or nobody else can log in.' });
+  if (DEV_OTP_ALLOWLIST.includes(normalized)) {
+    return res.json({ sent: true, via: 'dev-fallback', devCode: code, warning: 'WhatsApp is not configured on this server — showing the code directly. Set WHATSAPP_TOKEN/WHATSAPP_PHONE_NUMBER_ID before going live, or nobody else can log in.' });
+  }
+  return res.status(503).json({ error: "Couldn't deliver a login code to this number right now. Please try again shortly." });
 }));
 
 app.post('/api/auth/verify-otp', handle(async (req, res) => {
@@ -307,7 +311,13 @@ app.post('/api/bookings', handle(async (req, res) => {
       res.json(updated);
   }));
 
-app.get('/api/bookings', handle(async (req, res) => res.json(await store.bookings.all())));
+app.get('/api/bookings', handle(async (req, res) => {
+  const phone = String(req.query.phone || '').replace(/\D/g, '').slice(-10);
+  if (!phone) return res.json([]);
+  const all = await store.bookings.all();
+  const mine = all.filter((b) => b.shipperPhone === phone || b.transporterPhone === phone);
+  res.json(mine);
+}));
 app.get('/api/bookings/:id', handle(async (req, res) => {
   const booking = await store.bookings.findById(req.params.id);
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
@@ -534,6 +544,12 @@ app.get('/api/loads', handle(async (req, res) => {
 app.post('/api/loads', handle(async (req, res) => {
   const b = req.body || {};
   if (!b.from || !b.to || !b.material) return res.status(400).json({ error: 'from, to and material are required' });
+  if (b.rate !== undefined && b.rate !== null && b.rate !== '' && (isNaN(Number(b.rate)) || Number(b.rate) < 0)) {
+    return res.status(400).json({ error: 'rate must be a positive number.' });
+  }
+  if (b.weight !== undefined && b.weight !== null && b.weight !== '' && (isNaN(Number(b.weight)) || Number(b.weight) < 0)) {
+    return res.status(400).json({ error: 'weight must be a positive number.' });
+  }
   const item = {
     id: store.id(), from: b.from, to: b.to, material: b.material,
     weight: b.weight || null, truckType: b.truckType || 'Open Body',
@@ -545,6 +561,12 @@ app.post('/api/loads', handle(async (req, res) => {
 }));
 
 app.delete('/api/loads/:id', handle(async (req, res) => {
+  const load = (await store.loads.all()).find((l) => l.id === req.params.id);
+  if (!load) return res.status(404).json({ error: 'Load not found' });
+  const requesterPhone = String(req.query.requesterPhone || '').replace(/\D/g, '').slice(-10);
+  if (!requesterPhone || requesterPhone !== String(load.phone || '').replace(/\D/g, '').slice(-10)) {
+    return res.status(403).json({ error: 'Only the person who posted this load can remove it.' });
+  }
   await store.loads.removeById(req.params.id);
   res.status(204).end();
 }));
@@ -552,9 +574,14 @@ app.delete('/api/loads/:id', handle(async (req, res) => {
 // Toggle the "Featured" badge on a load — payment isn't wired up yet,
 // this just flips the flag; featured items sort to the top of listings.
 app.patch('/api/loads/:id/feature', handle(async (req, res) => {
+  const load = (await store.loads.all()).find((l) => l.id === req.params.id);
+  if (!load) return res.status(404).json({ error: 'Load not found' });
+  const requesterPhone = String(req.body?.requesterPhone || '').replace(/\D/g, '').slice(-10);
+  if (!requesterPhone || requesterPhone !== String(load.phone || '').replace(/\D/g, '').slice(-10)) {
+    return res.status(403).json({ error: 'Only the person who posted this load can feature it.' });
+  }
   const featured = Boolean(req.body?.featured);
   const updated = await store.loads.updateById(req.params.id, { featured });
-  if (!updated) return res.status(404).json({ error: 'Load not found' });
   res.json(updated);
 }));
 
@@ -570,6 +597,9 @@ app.get('/api/trucks', handle(async (req, res) => {
 app.post('/api/trucks', handle(async (req, res) => {
   const b = req.body || {};
   if (!b.from || !b.truckType || !b.capacity) return res.status(400).json({ error: 'from, truckType and capacity are required' });
+  if (isNaN(Number(b.capacity)) || Number(b.capacity) <= 0) {
+    return res.status(400).json({ error: 'capacity must be a positive number.' });
+  }
   const item = {
     id: store.id(), from: b.from, to: b.to || 'Anywhere',
     truckType: b.truckType, capacity: b.capacity, date: b.date || null,
@@ -583,15 +613,26 @@ app.post('/api/trucks', handle(async (req, res) => {
 }));
 
 app.delete('/api/trucks/:id', handle(async (req, res) => {
+  const truck = (await store.trucks.all()).find((tr) => tr.id === req.params.id);
+  if (!truck) return res.status(404).json({ error: 'Truck not found' });
+  const requesterPhone = String(req.query.requesterPhone || '').replace(/\D/g, '').slice(-10);
+  if (!requesterPhone || requesterPhone !== String(truck.phone || '').replace(/\D/g, '').slice(-10)) {
+    return res.status(403).json({ error: 'Only the person who posted this truck can remove it.' });
+  }
   await store.trucks.removeById(req.params.id);
   res.status(204).end();
 }));
 
 // Toggle the "Featured" badge on a truck — same as loads.
 app.patch('/api/trucks/:id/feature', handle(async (req, res) => {
+  const truck = (await store.trucks.all()).find((tr) => tr.id === req.params.id);
+  if (!truck) return res.status(404).json({ error: 'Truck not found' });
+  const requesterPhone = String(req.body?.requesterPhone || '').replace(/\D/g, '').slice(-10);
+  if (!requesterPhone || requesterPhone !== String(truck.phone || '').replace(/\D/g, '').slice(-10)) {
+    return res.status(403).json({ error: 'Only the person who posted this truck can feature it.' });
+  }
   const featured = Boolean(req.body?.featured);
   const updated = await store.trucks.updateById(req.params.id, { featured });
-  if (!updated) return res.status(404).json({ error: 'Truck not found' });
   res.json(updated);
 }));
 
