@@ -1,14 +1,14 @@
-// store.js — MongoDB Atlas-backed persistent store.
+// store.js â MongoDB Atlas-backed persistent store.
 //
 // Replaces the file-based store: Render's free tier disk is wiped on
 // every redeploy (which happens whenever new backend code is pushed),
-// so real posted data — trucks, loads, accounts, records — was only
+// so real posted data â trucks, loads, accounts, records â was only
 // ever living in temporary space. MongoDB Atlas's free M0 tier
 // persists forever, independent of Render's container lifecycle.
 //
 // Every collection stores plain objects with our own string `id`
 // field (not Mongo's ObjectId) so the frontend never has to know or
-// care that Mongo is involved — this file is the only thing that
+// care that Mongo is involved â this file is the only thing that
 // changed; server.js and every route is unaffected.
 const { MongoClient } = require('mongodb');
 
@@ -18,7 +18,7 @@ let dbPromise;
 function getDb() {
   if (!dbPromise) {
     if (!process.env.MONGODB_URI) {
-      throw new Error('MONGODB_URI is not set — add it to your .env (locally) or Render environment variables (in production).');
+      throw new Error('MONGODB_URI is not set â add it to your .env (locally) or Render environment variables (in production).');
     }
     client = new MongoClient(process.env.MONGODB_URI);
     dbPromise = client.connect().then(() => client.db(process.env.MONGODB_DB || 'maalwala'));
@@ -34,7 +34,7 @@ async function col(name) {
 function id() {
   return 'id' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
-// Strips everything except digits and keeps the last 10 — so "+91 98765-43210",
+// Strips everything except digits and keeps the last 10 â so "+91 98765-43210",
 // "9876543210", and "919876543210" all match the same user.
 function normalizePhoneForLookup(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
@@ -76,6 +76,7 @@ module.exports = {
     all: () => listAll('loads'),
     insert: (item) => insertOne('loads', item),
     removeById: (idVal) => removeById('loads', idVal),
+    updateById: (idVal, patch) => updateById('loads', idVal, patch),
   },
   trucks: {
     all: () => listAll('trucks'),
@@ -146,7 +147,7 @@ module.exports = {
     },
     insert: (item) => insertOne('bookings', item),
     updateById: (idVal, patch) => updateById('bookings', idVal, patch),
-    // Bookings that are past their auto-release window, delivered, undisputed —
+    // Bookings that are past their auto-release window, delivered, undisputed â
     // used by the release-check sweep instead of a real cron job.
     findReleasable: async (cutoffTs) => {
       const c = await col('bookings');
