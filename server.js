@@ -397,6 +397,32 @@ app.get('/api/bookings/:id/dispute-info', handle(async (req, res) => {
   res.json({ booking, gpsHistory });
 }));
 
+  // Transporter opts to get their 10% balance right now instead of
+  // waiting for the 48h auto-release. Costs 2% of the total booking
+  // amount, deducted from the balance itself before payout.
+  app.post('/api/bookings/:id/early-payout', handle(async (req, res) => {
+      const booking = await store.bookings.findById(req.params.id);
+      if (!booking) return res.status(404).json({ error: 'Booking not found' });
+      if (booking.status !== 'delivered_pending_confirmation') {
+            return res.status(400).json({ error: 'Early payout is only available after delivery has been marked and before the balance has already been released.' });
+      }
+      const earlyPayoutFee = Math.round((booking.totalAmount || 0) * 0.02 * 100) / 100;
+      const netAmount = Math.round((booking.balanceAmount - earlyPayoutFee) * 100) / 100;
+      const fundAccountId = await payments.getOrCreateFundAccount({
+            name: booking.transporterName, phone: booking.transporterPhone,
+            upiId: booking.transporterUpiId, bankAccount: booking.transporterBankAccount, bankIfsc: booking.transporterBankIfsc,
+      });
+      const payout = await payments.sendPayout({
+            fundAccountId, amountRupees: netAmount,
+            purpose: 'payout', referenceId: booking.id + '-early-balance',
+      });
+      const updated = await store.bookings.updateById(req.params.id, {
+            status: 'completed', balancePayoutId: payout.id, completedAt: Date.now(),
+            earlyPayout: true, earlyPayoutFee,
+      });
+      res.json(updated);
+  }));
+
 // Called periodically by the frontend (no real cron on Render's free
 // tier) — releases the held 10% for anything past its window with no
 // dispute raised. This is the "silence means pay" default from chat.
