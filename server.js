@@ -210,6 +210,7 @@ app.post('/api/fleet/sync-aditi', handle(async (req, res) => {
 // as paid" endpoint. See payments.js for why that matters.
 // =================================================================
 const AUTO_RELEASE_WINDOW_MS = 48 * 60 * 60 * 1000; // 48 hours after delivery confirmation
+const CANCELLATION_FEE_RATE = 0.02; // charged to whichever side cancels a confirmed booking
 
 app.get('/api/payments/status', (req, res) => {
   res.json({ paymentsConfigured: payments.isPaymentsConfigured(), payoutsConfigured: payments.isPayoutsConfigured() });
@@ -311,6 +312,50 @@ app.get('/api/bookings/:id', handle(async (req, res) => {
   const booking = await store.bookings.findById(req.params.id);
   if (!booking) return res.status(404).json({ error: 'Booking not found' });
   res.json(booking);
+}));
+
+// Either side backs out of a confirmed booking before delivery.
+// - Transporter cancelling a LOAD booking ('booked', no money moved yet):
+//   a payment link for the cancellation fee is generated and returned.
+// - Shipper cancelling a TRUCK booking before paying ('awaiting_payment'): same.
+// Cancelling after money has moved needs a manual refund via the Razorpay
+// dashboard, same as the existing dispute 'refund' path.
+app.post('/api/bookings/:id/cancel', handle(async (req, res) => {
+  const booking = await store.bookings.findById(req.params.id);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (!['booked', 'awaiting_payment'].includes(booking.status)) {
+    return res.status(400).json({ error: `Can't cancel from status "${booking.status}" — money has already moved on this booking, contact support for a manual resolution.` });
+  }
+  const { cancelledBy, reason } = req.body || {}; // 'shipper' | 'transporter'
+  if (!cancelledBy || !['shipper', 'transporter'].includes(cancelledBy)) {
+    return res.status(400).json({ error: "cancelledBy must be 'shipper' or 'transporter'." });
+  }
+
+  const cancellationFee = Math.round((booking.totalAmount || 0) * CANCELLATION_FEE_RATE * 100) / 100;
+  let feeLinkUrl = null;
+  try {
+    const payerName = cancelledBy === 'shipper' ? booking.shipperName : booking.transporterName;
+    const payerPhone = cancelledBy === 'shipper' ? booking.shipperPhone : booking.transporterPhone;
+    const link = await payments.createPaymentLink({
+      bookingId: booking.id + '-cancel',
+      amountRupees: cancellationFee,
+      description: `Maalwala cancellation fee — ${booking.route || 'booking'}`.trim(),
+      customerName: payerName, customerPhone: payerPhone,
+    });
+    feeLinkUrl = link.shortUrl;
+  } catch (e) {
+    console.error(`Cancellation fee link failed for booking ${booking.id}:`, e.message);
+    // Booking still gets cancelled even if the fee link couldn't be created
+    // (e.g. Razorpay not configured) — the fee just won't have a payable link.
+  }
+
+  const updated = await store.bookings.updateById(req.params.id, {
+    status: 'cancelled',
+    cancelledBy, cancellationReason: reason || '',
+    cancelledAt: Date.now(),
+    cancellationFee, cancellationFeeLinkUrl: feeLinkUrl,
+  });
+  res.json(updated);
 }));
 
 // Razorpay calls this — never the frontend directly. This is the only
@@ -480,7 +525,10 @@ app.post('/api/bookings/:id/resolve-dispute', handle(async (req, res) => {
 // Loads
 // ---------------------------------------------------------------
 app.get('/api/loads', handle(async (req, res) => {
-  res.json(await store.loads.all());
+  const all = await store.loads.all();
+  // Featured listings first, then newest first within each group.
+  all.sort((a, b) => (b.featured === true) - (a.featured === true) || (b.ts || 0) - (a.ts || 0));
+  res.json(all);
 }));
 
 app.post('/api/loads', handle(async (req, res) => {
@@ -491,7 +539,7 @@ app.post('/api/loads', handle(async (req, res) => {
     weight: b.weight || null, truckType: b.truckType || 'Open Body',
     rate: b.rate || null, date: b.date || null,
     poster: b.poster || 'Unknown', phone: b.phone || '',
-    verified: Boolean(b.verified), ts: Date.now(),
+    verified: Boolean(b.verified), featured: false, ts: Date.now(),
   };
   res.status(201).json(await store.loads.insert(item));
 }));
@@ -501,11 +549,22 @@ app.delete('/api/loads/:id', handle(async (req, res) => {
   res.status(204).end();
 }));
 
+// Toggle the "Featured" badge on a load — payment isn't wired up yet,
+// this just flips the flag; featured items sort to the top of listings.
+app.patch('/api/loads/:id/feature', handle(async (req, res) => {
+  const featured = Boolean(req.body?.featured);
+  const updated = await store.loads.updateById(req.params.id, { featured });
+  if (!updated) return res.status(404).json({ error: 'Load not found' });
+  res.json(updated);
+}));
+
 // ---------------------------------------------------------------
 // Trucks
 // ---------------------------------------------------------------
 app.get('/api/trucks', handle(async (req, res) => {
-  res.json(await store.trucks.all());
+  const all = await store.trucks.all();
+  all.sort((a, b) => (b.featured === true) - (a.featured === true) || (b.ts || 0) - (a.ts || 0));
+  res.json(all);
 }));
 
 app.post('/api/trucks', handle(async (req, res) => {
@@ -518,7 +577,7 @@ app.post('/api/trucks', handle(async (req, res) => {
     driverName: b.driverName || '', driverPhone: b.driverPhone || '',
     vehicleNumber: (b.vehicleNumber || '').toUpperCase(),
     payoutUpiId: b.payoutUpiId || '',
-    verified: Boolean(b.verified), ts: Date.now(),
+    verified: Boolean(b.verified), featured: false, ts: Date.now(),
   };
   res.status(201).json(await store.trucks.insert(item));
 }));
@@ -526,6 +585,14 @@ app.post('/api/trucks', handle(async (req, res) => {
 app.delete('/api/trucks/:id', handle(async (req, res) => {
   await store.trucks.removeById(req.params.id);
   res.status(204).end();
+}));
+
+// Toggle the "Featured" badge on a truck — same as loads.
+app.patch('/api/trucks/:id/feature', handle(async (req, res) => {
+  const featured = Boolean(req.body?.featured);
+  const updated = await store.trucks.updateById(req.params.id, { featured });
+  if (!updated) return res.status(404).json({ error: 'Truck not found' });
+  res.json(updated);
 }));
 
 app.patch('/api/trucks/:id', handle(async (req, res) => {
