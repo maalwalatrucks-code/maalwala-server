@@ -534,6 +534,33 @@ app.post('/api/bookings/:id/resolve-dispute', handle(async (req, res) => {
 // ---------------------------------------------------------------
 // Loads
 // ---------------------------------------------------------------
+// Rate estimator — a common feature on competitor marketplaces (Vahak's
+// "Check Price", FR8's live rates). Built from our own posted-load history
+// rather than an external pricing API, since we don't have one. Honest
+// about it when there isn't enough data yet, rather than guessing.
+app.get('/api/rate-estimate', handle(async (req, res) => {
+  const from = String(req.query.from || '').trim().toLowerCase();
+  const to = String(req.query.to || '').trim().toLowerCase();
+  const truckType = String(req.query.truckType || '').trim();
+  if (!from || !to) return res.status(400).json({ error: 'from and to are required.' });
+
+  const loads = await store.loads.all();
+  const sameRoute = (l) => (l.from || '').trim().toLowerCase() === from && (l.to || '').trim().toLowerCase() === to && l.rate;
+
+  let matches = loads.filter((l) => sameRoute(l) && (!truckType || l.truckType === truckType));
+  let matchType = 'route+truckType';
+  if (!matches.length) {
+    matches = loads.filter(sameRoute);
+    matchType = 'route';
+  }
+  if (!matches.length) {
+    return res.json({ available: false, sampleSize: 0, message: `No pricing history yet for this route — post your own rate and it'll help build estimates for the next person.` });
+  }
+  const rates = matches.map((l) => Number(l.rate)).filter((n) => !isNaN(n) && n > 0);
+  const avgRate = Math.round(rates.reduce((a, b) => a + b, 0) / rates.length);
+  res.json({ available: true, sampleSize: rates.length, matchType, avgRate, minRate: Math.min(...rates), maxRate: Math.max(...rates) });
+}));
+
 app.get('/api/loads', handle(async (req, res) => {
   const all = await store.loads.all();
   // Featured listings first, then newest first within each group.
