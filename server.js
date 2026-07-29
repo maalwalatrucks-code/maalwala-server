@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const store = require('./store');
 const whatsapp = require('./whatsapp');
+const sms = require('./sms'); // SMS OTP via MSG91 — replaces WhatsApp for login codes
 const auth = require('./auth');
 const aditi = require('./aditi');
 const payments = require('./payments');
@@ -98,26 +99,26 @@ app.post('/api/auth/request-otp', handle(async (req, res) => {
     return res.status(429).json({ error: 'Please wait a few seconds before requesting another code.' });
   }
 
-  const code = auth.generateOtp();
-  await store.otps.insert({ id: store.id(), phone: normalized, codeHash: auth.hashOtp(code), ts: Date.now(), used: false });
-
-  if (whatsapp.isConfigured()) {
-    try {
-      await whatsapp.sendTextMessage('91' + normalized, `Your Maalwala login code is: ${code}\n\nValid for 10 minutes. Don't share this with anyone.`);
-      return res.json({ sent: true, via: 'whatsapp' });
-    } catch (e) {
-      console.error('OTP WhatsApp send failed:', e.message);
-      // fall through to dev-mode response below
-    }
-  }
-  // WhatsApp isn't configured (or the send failed) — rather than lock
-  // everyone out of the site, return the code directly with a loud
-  // warning. This must never happen once WhatsApp is actually set up.
-  console.warn(`⚠️  DEV MODE: WhatsApp not configured — OTP for ${normalized} is ${code}`);
   if (DEV_OTP_ALLOWLIST.includes(normalized)) {
-    return res.json({ sent: true, via: 'dev-fallback', devCode: code, warning: 'WhatsApp is not configured on this server — showing the code directly. Set WHATSAPP_TOKEN/WHATSAPP_PHONE_NUMBER_ID before going live, or nobody else can log in.' });
+    const code = auth.generateOtp();
+    await store.otps.insert({ id: store.id(), phone: normalized, codeHash: auth.hashOtp(code), ts: Date.now(), used: false });
+    console.warn(`⚠️  DEV MODE: OTP for allowlisted number ${normalized} is ${code}`);
+    return res.json({ sent: true, via: 'dev-fallback', devCode: code, warning: 'This number is on the dev allowlist — showing the code directly instead of sending a real SMS.' });
   }
-  return res.status(503).json({ error: "Couldn't deliver a login code to this number right now. Please try again shortly." });
+  if (!sms.isConfigured()) {
+    return res.status(503).json({ error: 'SMS login is not configured on this server yet.' });
+  }
+  try {
+    await sms.sendOtp(normalized);
+    // No local code/hash stored — MSG91 owns verification. This record
+    // exists only so verify-otp has something to check cooldown/expiry
+    // against, and so it knows to route verification to MSG91.
+    await store.otps.insert({ id: store.id(), phone: normalized, ts: Date.now(), used: false });
+    return res.json({ sent: true, via: 'sms' });
+  } catch (e) {
+    console.error('MSG91 OTP send failed:', e.message);
+    return res.status(503).json({ error: "Couldn't deliver a login code to this number right now. Please try again shortly." });
+  }
 }));
 
 app.post('/api/auth/verify-otp', handle(async (req, res) => {
@@ -129,7 +130,13 @@ app.post('/api/auth/verify-otp', handle(async (req, res) => {
   if (!record) return res.status(400).json({ error: 'No code was requested for this number — request one first.' });
   if (record.used) return res.status(400).json({ error: 'This code has already been used. Request a new one.' });
   if (Date.now() - record.ts > OTP_EXPIRY_MS) return res.status(400).json({ error: 'This code has expired. Request a new one.' });
-  if (!auth.verifyOtp(String(code), record.codeHash)) return res.status(401).json({ error: 'Incorrect code.' });
+  let valid;
+  if (record.codeHash) {
+    valid = auth.verifyOtp(String(code), record.codeHash); // dev-allowlist path
+  } else {
+    valid = await sms.verifyOtp(normalized, String(code)); // real MSG91 path
+  }
+  if (!valid) return res.status(401).json({ error: 'Incorrect code.' });
 
   await store.otps.removeForPhone(normalized); // single-use
 
