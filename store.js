@@ -158,6 +158,7 @@ module.exports = {
     },
     insert: (item) => insertOne('bookings', item),
     updateById: (idVal, patch) => updateById('bookings', idVal, patch),
+    removeById: (idVal) => removeById('bookings', idVal),
     // Bookings that are past their auto-release window, delivered, undisputed â
     // used by the release-check sweep instead of a real cron job.
     findReleasable: async (cutoffTs) => {

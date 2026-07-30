@@ -222,6 +222,7 @@ app.post('/api/fleet/sync-aditi', handle(async (req, res) => {
 // =================================================================
 const AUTO_RELEASE_WINDOW_MS = 48 * 60 * 60 * 1000; // 48 hours after delivery confirmation
 const CANCELLATION_FEE_RATE = 0.02; // charged to whichever side cancels a confirmed booking
+const FEATURE_FEE_RUPEES = 99; // flat fee to feature a listing — unfeaturing stays free
 
 app.get('/api/payments/status', (req, res) => {
   res.json({ paymentsConfigured: payments.isPaymentsConfigured(), payoutsConfigured: payments.isPayoutsConfigured() });
@@ -331,6 +332,11 @@ app.get('/api/bookings/:id', handle(async (req, res) => {
   res.json(booking);
 }));
 
+app.delete('/api/bookings/:id', handle(async (req, res) => {
+  await store.bookings.removeById(req.params.id);
+  res.status(204).end();
+}));
+
 // Either side backs out of a confirmed booking before delivery.
 // - Transporter cancelling a LOAD booking ('booked', no money moved yet):
 //   a payment link for the cancellation fee is generated and returned.
@@ -390,6 +396,15 @@ app.post('/api/webhooks/razorpay', handle(async (req, res) => {
     const bookingId = event.payload?.payment_link?.entity?.reference_id
       || event.payload?.payment?.entity?.notes?.bookingId;
     if (!bookingId) return res.sendStatus(200);
+
+    if (bookingId.endsWith('-feature-load')) {
+      await store.loads.updateById(bookingId.replace('-feature-load', ''), { featured: true, featurePending: false });
+      return res.sendStatus(200);
+    }
+    if (bookingId.endsWith('-feature-truck')) {
+      await store.trucks.updateById(bookingId.replace('-feature-truck', ''), { featured: true, featurePending: false });
+      return res.sendStatus(200);
+    }
 
     const booking = await store.bookings.findById(bookingId);
     if (!booking || booking.status !== 'awaiting_payment') return res.sendStatus(200); // already processed or unknown — idempotent
@@ -615,8 +630,18 @@ app.patch('/api/loads/:id/feature', handle(async (req, res) => {
     return res.status(403).json({ error: 'Only the person who posted this load can feature it.' });
   }
   const featured = Boolean(req.body?.featured);
-  const updated = await store.loads.updateById(req.params.id, { featured });
-  res.json(updated);
+  if (!featured) {
+    const updated = await store.loads.updateById(req.params.id, { featured: false, featurePending: false });
+    return res.json(updated);
+  }
+  const link = await payments.createPaymentLink({
+    bookingId: req.params.id + '-feature-load',
+    amountRupees: FEATURE_FEE_RUPEES,
+    description: `Maalwala featured listing — ${load.from || ''} → ${load.to || ''}`.trim(),
+    customerName: load.poster, customerPhone: load.phone,
+  });
+  await store.loads.updateById(req.params.id, { featurePending: true });
+  res.json({ paymentRequired: true, paymentLinkUrl: link.shortUrl, fee: FEATURE_FEE_RUPEES });
 }));
 
 // ---------------------------------------------------------------
@@ -666,8 +691,18 @@ app.patch('/api/trucks/:id/feature', handle(async (req, res) => {
     return res.status(403).json({ error: 'Only the person who posted this truck can feature it.' });
   }
   const featured = Boolean(req.body?.featured);
-  const updated = await store.trucks.updateById(req.params.id, { featured });
-  res.json(updated);
+  if (!featured) {
+    const updated = await store.trucks.updateById(req.params.id, { featured: false, featurePending: false });
+    return res.json(updated);
+  }
+  const link = await payments.createPaymentLink({
+    bookingId: req.params.id + '-feature-truck',
+    amountRupees: FEATURE_FEE_RUPEES,
+    description: `Maalwala featured listing — ${truck.from || ''} → ${truck.to || 'Anywhere'}`.trim(),
+    customerName: truck.poster, customerPhone: truck.phone,
+  });
+  await store.trucks.updateById(req.params.id, { featurePending: true });
+  res.json({ paymentRequired: true, paymentLinkUrl: link.shortUrl, fee: FEATURE_FEE_RUPEES });
 }));
 
 app.patch('/api/trucks/:id', handle(async (req, res) => {
